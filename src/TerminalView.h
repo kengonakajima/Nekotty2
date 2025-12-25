@@ -1,7 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #import <ghostty.h>
 
-@interface TerminalView : NSView
+@interface TerminalView : NSView <NSTextInputClient>
 
 @property (nonatomic, assign) ghostty_surface_t surface;
 

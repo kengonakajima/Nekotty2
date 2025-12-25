@@ -1,7 +1,11 @@
 #import "TerminalView.h"
 #import <QuartzCore/QuartzCore.h>
 
-@implementation TerminalView
+@implementation TerminalView {
+    NSString *_markedText;
+    NSRange _markedRange;
+    NSRange _selectedRange;
+}
 
 - (instancetype)initWithApp:(ghostty_app_t)app frame:(NSRect)frame {
     self = [super initWithFrame:frame];
@@ -85,16 +89,7 @@
 // Keyboard input
 - (void)keyDown:(NSEvent *)event {
     if (!self.surface) return;
-
-    ghostty_input_key_s key = {0};
-    key.action = GHOSTTY_ACTION_PRESS;
-    key.mods = [self modsFromEvent:event];
-    key.keycode = [event keyCode];
-    key.text = [[event characters] UTF8String];
-
-    if (!ghostty_surface_key(self.surface, key)) {
-        [super keyDown:event];
-    }
+    [self interpretKeyEvents:@[event]];
 }
 
 - (void)keyUp:(NSEvent *)event {
@@ -119,6 +114,118 @@
     if (flags & NSEventModifierFlagCapsLock) mods |= GHOSTTY_MODS_CAPS;
 
     return mods;
+}
+
+#pragma mark - NSTextInputClient
+
+- (void)insertText:(id)string replacementRange:(NSRange)replacementRange {
+    if (!self.surface) return;
+
+    NSString *text = [string isKindOfClass:[NSAttributedString class]]
+        ? [(NSAttributedString *)string string]
+        : (NSString *)string;
+
+    // Always clear preedit state before sending text
+    ghostty_surface_preedit(self.surface, NULL, 0);
+
+    // Clear marked text state
+    _markedText = nil;
+    _markedRange = NSMakeRange(NSNotFound, 0);
+
+    // Send text via key event (like Ghostty does)
+    NSEvent *event = [NSApp currentEvent];
+    if (event && text.length > 0) {
+        ghostty_input_key_s key = {0};
+        key.action = GHOSTTY_ACTION_PRESS;
+        key.mods = [self modsFromEvent:event];
+        key.keycode = [event keyCode];
+        key.composing = NO;
+
+        const char *utf8 = [text UTF8String];
+        if (utf8 && (uint8_t)utf8[0] >= 0x20) {
+            key.text = utf8;
+        }
+        ghostty_surface_key(self.surface, key);
+    }
+}
+
+- (void)setMarkedText:(id)string selectedRange:(NSRange)selectedRange replacementRange:(NSRange)replacementRange {
+    NSString *text = [string isKindOfClass:[NSAttributedString class]]
+        ? [(NSAttributedString *)string string]
+        : (NSString *)string;
+
+    _markedText = text;
+    _selectedRange = selectedRange;
+    _markedRange = NSMakeRange(0, text.length);
+
+    // Send preedit to terminal
+    if (self.surface && text.length > 0) {
+        const char *utf8 = [text UTF8String];
+        if (utf8) {
+            ghostty_surface_preedit(self.surface, utf8, strlen(utf8));
+        }
+    }
+}
+
+- (void)unmarkText {
+    if (_markedText.length > 0) {
+        _markedText = nil;
+        _markedRange = NSMakeRange(NSNotFound, 0);
+        if (self.surface) {
+            ghostty_surface_preedit(self.surface, NULL, 0);
+        }
+    }
+}
+
+- (NSRange)selectedRange {
+    return _selectedRange;
+}
+
+- (NSRange)markedRange {
+    return _markedRange;
+}
+
+- (BOOL)hasMarkedText {
+    return _markedText.length > 0;
+}
+
+- (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
+    return nil;
+}
+
+- (NSArray<NSAttributedStringKey> *)validAttributesForMarkedText {
+    return @[];
+}
+
+- (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
+    // Return cursor position for IME candidate window
+    NSRect rect = NSMakeRect(0, 0, 0, 20);
+    if (self.window) {
+        rect = [self convertRect:rect toView:nil];
+        rect = [self.window convertRectToScreen:rect];
+    }
+    return rect;
+}
+
+- (NSUInteger)characterIndexForPoint:(NSPoint)point {
+    return NSNotFound;
+}
+
+- (void)doCommandBySelector:(SEL)selector {
+    // Handle special keys (Enter, Delete, arrows, etc.)
+    if (!self.surface) return;
+
+    NSEvent *event = [NSApp currentEvent];
+    if (event && event.type == NSEventTypeKeyDown) {
+        ghostty_input_key_s key = {0};
+        key.action = GHOSTTY_ACTION_PRESS;
+        key.mods = [self modsFromEvent:event];
+        key.keycode = [event keyCode];
+        key.composing = NO;
+        key.text = NULL;
+
+        ghostty_surface_key(self.surface, key);
+    }
 }
 
 - (NSString *)lastLinesText:(int)lineCount maxChars:(int)maxChars {
