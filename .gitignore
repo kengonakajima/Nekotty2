@@ -1,0 +1,12 @@
+# Build artifacts
+build/
+*.app/
+
+# IDE/Editor
+.claude/
+.vscode/
+*.xcworkspace/
+*.xcuserdata/
+
+# macOS
+.DS_Store
