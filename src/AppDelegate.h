@@ -4,4 +4,6 @@
 
 @property (strong, nonatomic) NSWindow *window;
 
+- (void)tick;
+
 @end
