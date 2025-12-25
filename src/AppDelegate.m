@@ -45,13 +45,16 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     });
 }
 
+static const CGFloat kThumbnailHeight = 100;
+
 @implementation AppDelegate {
     ghostty_app_t _app;
     ghostty_config_t _config;
     NSSplitView *_splitView;
     NSScrollView *_leftScrollView;
-    NSTableView *_terminalListView;
-    NSView *_rightPane;      // Container for terminal
+    NSView *_thumbnailContainer;
+    NSMutableArray<NSView *> *_thumbnailViews;
+    NSView *_rightPane;
     TerminalManager *_terminalManager;
     NSTimer *_tickTimer;
     CGFloat _leftWidth;
@@ -111,25 +114,20 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     [_splitView setDividerStyle:NSSplitViewDividerStyleThin];
     [_splitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-    // Create left pane (terminal list)
+    // Create left pane (thumbnail list using simple NSView)
     NSRect leftFrame = NSMakeRect(0, 0, _leftWidth, contentBounds.size.height);
     _leftScrollView = [[NSScrollView alloc] initWithFrame:leftFrame];
     [_leftScrollView setHasVerticalScroller:YES];
     [_leftScrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [_leftScrollView setDrawsBackground:YES];
+    [_leftScrollView setBackgroundColor:[NSColor colorWithWhite:0.15 alpha:1.0]];
 
-    _terminalListView = [[NSTableView alloc] initWithFrame:leftFrame];
-    [_terminalListView setDataSource:self];
-    [_terminalListView setDelegate:self];
-    [_terminalListView setHeaderView:nil];
-    [_terminalListView setRowHeight:80];
-    [_terminalListView setBackgroundColor:[NSColor colorWithWhite:0.15 alpha:1.0]];
-    [_terminalListView setSelectionHighlightStyle:NSTableViewSelectionHighlightStyleRegular];
+    // Create container view for thumbnails
+    _thumbnailContainer = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, _leftWidth, contentBounds.size.height)];
+    [_thumbnailContainer setWantsLayer:YES];
+    _thumbnailViews = [NSMutableArray array];
 
-    NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"Terminal"];
-    [column setWidth:_leftWidth - 20];
-    [_terminalListView addTableColumn:column];
-
-    [_leftScrollView setDocumentView:_terminalListView];
+    [_leftScrollView setDocumentView:_thumbnailContainer];
 
     // Create right pane (terminal container)
     NSRect rightFrame = NSMakeRect(0, 0, contentBounds.size.width - _leftWidth, contentBounds.size.height);
@@ -137,13 +135,7 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     [_rightPane setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
     // Create first terminal
-    TerminalView *firstTerminal = [_terminalManager createTerminalWithFrame:_rightPane.bounds];
-    if (!firstTerminal) {
-        NSLog(@"Failed to create terminal view");
-        return;
-    }
-    [firstTerminal setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-    [_rightPane addSubview:firstTerminal];
+    [self createNewTerminal];
 
     // Add subviews to split view
     [_splitView addSubview:_leftScrollView];
@@ -154,15 +146,11 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     // Set divider position after layout is complete
     dispatch_async(dispatch_get_main_queue(), ^{
         [self->_splitView setPosition:self->_leftWidth ofDividerAtIndex:0];
-        [self->_terminalManager.selectedTerminal updateSize];
-        // Select first terminal in list
-        [self->_terminalListView reloadData];
-        [self->_terminalListView selectRowIndexes:[NSIndexSet indexSetWithIndex:0]
-                             byExtendingSelection:NO];
+        [self showSelectedTerminal];
     });
 
     [self.window makeKeyAndOrderFront:nil];
-    [self.window makeFirstResponder:firstTerminal];
+    [self.window makeFirstResponder:_terminalManager.selectedTerminal];
 
     // Start tick timer
     _tickTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
@@ -173,13 +161,66 @@ static void close_surface_cb(void *userdata, bool processAlive) {
 }
 
 - (void)tick {
+    static int tickCount = 0;
+    tickCount++;
+
     if (_app) {
         ghostty_app_tick(_app);
     }
+
     // Redraw all terminals
     for (TerminalView *terminal in _terminalManager.terminals) {
         [terminal setNeedsDisplay:YES];
     }
+
+    // Update thumbnails every 10 ticks (~6 fps)
+    if (tickCount % 10 == 0) {
+        [self updateThumbnails];
+    }
+}
+
+- (void)updateThumbnails {
+    for (NSUInteger i = 0; i < _terminalManager.terminals.count; i++) {
+        TerminalView *terminal = _terminalManager.terminals[i];
+        NSView *container = _thumbnailViews[i];
+        NSImageView *imageView = [container viewWithTag:1];
+
+        if (imageView && terminal) {
+            // Capture terminal content to image
+            NSImage *image = [self captureTerminal:terminal];
+            if (image) {
+                [imageView setImage:image];
+            }
+        }
+    }
+}
+
+- (NSImage *)captureTerminal:(TerminalView *)terminal {
+    if (!terminal || terminal.bounds.size.width <= 0 || terminal.bounds.size.height <= 0) {
+        return nil;
+    }
+
+    // Temporarily show if hidden
+    BOOL wasHidden = terminal.isHidden;
+    [terminal setHidden:NO];
+
+    // Force draw
+    [terminal displayIfNeeded];
+
+    // Create bitmap from view
+    NSBitmapImageRep *bitmap = [terminal bitmapImageRepForCachingDisplayInRect:terminal.bounds];
+    if (bitmap) {
+        [terminal cacheDisplayInRect:terminal.bounds toBitmapImageRep:bitmap];
+        NSImage *image = [[NSImage alloc] initWithSize:terminal.bounds.size];
+        [image addRepresentation:bitmap];
+
+        // Restore hidden state
+        [terminal setHidden:wasHidden];
+        return image;
+    }
+
+    [terminal setHidden:wasHidden];
+    return nil;
 }
 
 - (void)setupMenu {
@@ -203,77 +244,138 @@ static void close_surface_cb(void *userdata, bool processAlive) {
 }
 
 - (void)newTerminal:(id)sender {
-    // Hide current terminal
-    TerminalView *current = _terminalManager.selectedTerminal;
-    if (current) {
-        [current setHidden:YES];
-    }
-
-    // Create new terminal
-    TerminalView *newTerminal = [_terminalManager createTerminalWithFrame:_rightPane.bounds];
-    if (newTerminal) {
-        [newTerminal setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-        [_rightPane addSubview:newTerminal];
-        [_terminalManager selectTerminal:newTerminal];
-        [self.window makeFirstResponder:newTerminal];
-
-        // Update list and select new terminal
-        [_terminalListView reloadData];
-        [_terminalListView selectRowIndexes:[NSIndexSet indexSetWithIndex:_terminalManager.selectedIndex]
-                       byExtendingSelection:NO];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [newTerminal updateSize];
-        });
-    }
+    [self createNewTerminal];
 }
 
 - (void)selectTerminalAtIndex:(NSUInteger)index {
     if (index >= _terminalManager.terminals.count) return;
+    if (index == _terminalManager.selectedIndex) return;
 
-    // Hide current terminal
-    TerminalView *current = _terminalManager.selectedTerminal;
-    if (current) {
-        [current setHidden:YES];
-    }
-
-    // Show selected terminal
     [_terminalManager selectTerminalAtIndex:index];
+    [self showSelectedTerminal];
+    [self.window makeFirstResponder:_terminalManager.selectedTerminal];
+}
+
+#pragma mark - Terminal Management
+
+- (void)createNewTerminal {
+    // Create terminal at full size in right pane
+    TerminalView *terminal = [_terminalManager createTerminalWithFrame:_rightPane.bounds];
+    if (!terminal) {
+        NSLog(@"Failed to create terminal");
+        return;
+    }
+    [terminal setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [terminal setHidden:YES]; // Initially hidden
+    [_rightPane addSubview:terminal];
+
+    // Create clickable container for thumbnail (with NSImageView)
+    NSView *container = [self createThumbnailContainerForTerminal:terminal];
+    [_thumbnailViews addObject:container];
+    [_thumbnailContainer addSubview:container];
+    [self layoutThumbnails];
+    NSLog(@"Added container. Now have %lu thumbnails", (unsigned long)_thumbnailViews.count);
+
+    // Select the new terminal
+    [_terminalManager selectTerminal:terminal];
+    [self showSelectedTerminal];
+    [self.window makeFirstResponder:terminal];
+}
+
+- (void)layoutThumbnails {
+    CGFloat spacing = 8;
+    CGFloat margin = 8;
+    CGFloat containerWidth = _leftWidth - margin * 2;
+
+    // Calculate total height needed
+    CGFloat totalHeight = margin + (_thumbnailViews.count * (kThumbnailHeight + spacing));
+    CGFloat scrollHeight = _leftScrollView.bounds.size.height;
+    if (totalHeight < scrollHeight) {
+        totalHeight = scrollHeight;
+    }
+
+    // Update document view size
+    [_thumbnailContainer setFrameSize:NSMakeSize(_leftWidth, totalHeight)];
+
+    // Place items from top (in flipped coordinates, top = totalHeight - margin)
+    CGFloat y = totalHeight - margin - kThumbnailHeight;
+    for (NSView *container in _thumbnailViews) {
+        [container setFrame:NSMakeRect(margin, y, containerWidth, kThumbnailHeight)];
+        y -= kThumbnailHeight + spacing;
+    }
+}
+
+- (NSView *)createThumbnailContainerForTerminal:(TerminalView *)terminal {
+    CGFloat containerWidth = _leftWidth - 16;
+    NSView *container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, containerWidth, kThumbnailHeight)];
+    [container setWantsLayer:YES];
+    [container.layer setBackgroundColor:[[NSColor colorWithWhite:0.1 alpha:1.0] CGColor]];
+    [container.layer setBorderColor:[[NSColor grayColor] CGColor]];
+    [container.layer setBorderWidth:1.0];
+    [container.layer setCornerRadius:4.0];
+
+    // Add NSImageView for thumbnail
+    NSImageView *imageView = [[NSImageView alloc] initWithFrame:container.bounds];
+    [imageView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [imageView setImageScaling:NSImageScaleProportionallyUpOrDown];
+    [imageView setTag:1]; // Tag to find it later
+    [container addSubview:imageView];
+
+    // Add click gesture
+    NSClickGestureRecognizer *click = [[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(thumbnailClicked:)];
+    [container addGestureRecognizer:click];
+
+    // Store terminal reference in container
+    [container setIdentifier:[NSString stringWithFormat:@"%p", terminal]];
+
+    NSLog(@"Created thumbnail container: %.0fx%.0f for terminal %p", containerWidth, kThumbnailHeight, terminal);
+
+    return container;
+}
+
+- (void)thumbnailClicked:(NSClickGestureRecognizer *)gesture {
+    NSView *container = gesture.view;
+    // Find the terminal by matching container identifier
+    for (NSUInteger i = 0; i < _terminalManager.terminals.count; i++) {
+        TerminalView *terminal = _terminalManager.terminals[i];
+        NSString *terminalId = [NSString stringWithFormat:@"%p", terminal];
+        if ([container.identifier isEqualToString:terminalId]) {
+            [self selectTerminalAtIndex:i];
+            break;
+        }
+    }
+}
+
+- (void)showSelectedTerminal {
     TerminalView *selected = _terminalManager.selectedTerminal;
+
+    // Hide all terminals, show only selected
+    for (TerminalView *t in _terminalManager.terminals) {
+        [t setHidden:(t != selected)];
+    }
+
+    // Update size for selected terminal
     if (selected) {
-        [selected setHidden:NO];
-        [self.window makeFirstResponder:selected];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [selected updateSize];
+        });
     }
+
+    // Update thumbnail borders to show selection
+    [self updateThumbnailSelectionBorders];
 }
 
-#pragma mark - NSTableViewDataSource
-
-- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
-    return _terminalManager.terminals.count;
-}
-
-#pragma mark - NSTableViewDelegate
-
-- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
-    NSTextField *cell = [tableView makeViewWithIdentifier:@"TerminalCell" owner:self];
-    if (!cell) {
-        cell = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, tableColumn.width, 80)];
-        [cell setIdentifier:@"TerminalCell"];
-        [cell setBezeled:NO];
-        [cell setDrawsBackground:NO];
-        [cell setEditable:NO];
-        [cell setSelectable:NO];
-        [cell setTextColor:[NSColor whiteColor]];
-        [cell setFont:[NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular]];
-    }
-    cell.stringValue = [NSString stringWithFormat:@"Terminal %ld", (long)row + 1];
-    return cell;
-}
-
-- (void)tableViewSelectionDidChange:(NSNotification *)notification {
-    NSInteger selectedRow = [_terminalListView selectedRow];
-    if (selectedRow >= 0 && (NSUInteger)selectedRow != _terminalManager.selectedIndex) {
-        [self selectTerminalAtIndex:(NSUInteger)selectedRow];
+- (void)updateThumbnailSelectionBorders {
+    TerminalView *selected = _terminalManager.selectedTerminal;
+    for (NSView *container in _thumbnailViews) {
+        NSString *terminalId = [NSString stringWithFormat:@"%p", selected];
+        if ([container.identifier isEqualToString:terminalId]) {
+            [container.layer setBorderColor:[[NSColor selectedControlColor] CGColor]];
+            [container.layer setBorderWidth:2.0];
+        } else {
+            [container.layer setBorderColor:[[NSColor grayColor] CGColor]];
+            [container.layer setBorderWidth:1.0];
+        }
     }
 }
 

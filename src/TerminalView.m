@@ -121,4 +121,39 @@
     return mods;
 }
 
+- (NSString *)lastLinesText:(int)lineCount maxChars:(int)maxChars {
+    if (!self.surface) return @"";
+
+    // Get terminal grid size
+    ghostty_surface_size_s size = ghostty_surface_size(self.surface);
+    if (size.rows == 0 || size.columns == 0) return @"";
+
+    // Calculate selection for last N lines
+    int startRow = (size.rows > lineCount) ? (size.rows - lineCount) : 0;
+    int endCol = (size.columns > maxChars) ? maxChars : size.columns;
+
+    ghostty_selection_s selection = {0};
+    selection.top_left.x = 0;
+    selection.top_left.y = startRow;
+    selection.bottom_right.x = endCol;
+    selection.bottom_right.y = size.rows;
+    selection.rectangle = true;
+
+    ghostty_text_s text = {0};
+    if (!ghostty_surface_read_text(self.surface, selection, &text)) {
+        return @"";
+    }
+
+    NSString *result = @"";
+    if (text.text && text.text_len > 0) {
+        result = [[NSString alloc] initWithBytes:text.text
+                                          length:text.text_len
+                                        encoding:NSUTF8StringEncoding];
+        if (!result) result = @"";
+    }
+
+    ghostty_surface_free_text(self.surface, &text);
+    return result;
+}
+
 @end
