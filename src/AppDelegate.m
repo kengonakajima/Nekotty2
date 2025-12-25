@@ -47,6 +47,8 @@ static void close_surface_cb(void *userdata, bool processAlive) {
 @implementation AppDelegate {
     ghostty_app_t _app;
     ghostty_config_t _config;
+    NSSplitView *_splitView;
+    NSView *_leftPane;       // Tree view placeholder
     TerminalView *_terminalView;
     NSTimer *_tickTimer;
 }
@@ -89,15 +91,43 @@ static void close_surface_cb(void *userdata, bool processAlive) {
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
     [self.window setTitle:@"Nekotty"];
+    [self.window setBackgroundColor:[NSColor blackColor]];
 
-    // Create terminal view
-    _terminalView = [[TerminalView alloc] initWithApp:_app frame:[[self.window contentView] bounds]];
+    // Create split view
+    NSRect contentBounds = [[self.window contentView] bounds];
+    _splitView = [[NSSplitView alloc] initWithFrame:contentBounds];
+    [_splitView setVertical:YES];
+    [_splitView setDividerStyle:NSSplitViewDividerStyleThin];
+    [_splitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+    // Create left pane (tree view placeholder)
+    CGFloat leftWidth = 300;
+    NSRect leftFrame = NSMakeRect(0, 0, leftWidth, contentBounds.size.height);
+    _leftPane = [[NSView alloc] initWithFrame:leftFrame];
+    [_leftPane setWantsLayer:YES];
+    [_leftPane.layer setBackgroundColor:[[NSColor colorWithWhite:0.15 alpha:1.0] CGColor]];
+
+    // Create terminal view (right pane)
+    NSRect rightFrame = NSMakeRect(0, 0, contentBounds.size.width - leftWidth, contentBounds.size.height);
+    _terminalView = [[TerminalView alloc] initWithApp:_app frame:rightFrame];
     if (!_terminalView) {
         NSLog(@"Failed to create terminal view");
         return;
     }
     [_terminalView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-    [[self.window contentView] addSubview:_terminalView];
+
+    // Add subviews to split view
+    [_splitView addSubview:_leftPane];
+    [_splitView addSubview:_terminalView];
+
+    [[self.window contentView] addSubview:_splitView];
+
+    // Set divider position after layout is complete
+    CGFloat savedLeftWidth = leftWidth;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self->_splitView setPosition:savedLeftWidth ofDividerAtIndex:0];
+        [self->_terminalView updateSize];
+    });
 
     [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:_terminalView];

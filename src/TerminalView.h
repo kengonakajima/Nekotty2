@@ -6,5 +6,6 @@
 @property (nonatomic, assign) ghostty_surface_t surface;
 
 - (instancetype)initWithApp:(ghostty_app_t)app frame:(NSRect)frame;
+- (void)updateSize;
 
 @end

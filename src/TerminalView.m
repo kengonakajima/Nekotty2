@@ -49,18 +49,31 @@
     }
 }
 
+- (void)viewDidMoveToSuperview {
+    [super viewDidMoveToSuperview];
+    [self updateSize];
+}
+
 - (void)setFrameSize:(NSSize)newSize {
     [super setFrameSize:newSize];
     [self updateSize];
 }
 
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
+    [super resizeSubviewsWithOldSize:oldSize];
+    [self updateSize];
+}
+
 - (void)updateSize {
     if (!self.surface) return;
-    NSSize size = self.frame.size;
-    double scale = [[NSScreen mainScreen] backingScaleFactor];
-    ghostty_surface_set_size(self.surface,
-                             (uint32_t)(size.width * scale),
-                             (uint32_t)(size.height * scale));
+    NSSize size = self.bounds.size;
+    if (size.width <= 0 || size.height <= 0) return;
+
+    double scale = self.window ? self.window.backingScaleFactor : [[NSScreen mainScreen] backingScaleFactor];
+    uint32_t width = (uint32_t)(size.width * scale);
+    uint32_t height = (uint32_t)(size.height * scale);
+    NSLog(@"updateSize: bounds=%.0fx%.0f scale=%.1f pixels=%ux%u", size.width, size.height, scale, width, height);
+    ghostty_surface_set_size(self.surface, width, height);
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
