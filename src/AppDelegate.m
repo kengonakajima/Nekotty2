@@ -49,7 +49,8 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     ghostty_app_t _app;
     ghostty_config_t _config;
     NSSplitView *_splitView;
-    NSView *_leftPane;       // Tree view placeholder
+    NSScrollView *_leftScrollView;
+    NSTableView *_terminalListView;
     NSView *_rightPane;      // Container for terminal
     TerminalManager *_terminalManager;
     NSTimer *_tickTimer;
@@ -110,11 +111,25 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     [_splitView setDividerStyle:NSSplitViewDividerStyleThin];
     [_splitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-    // Create left pane (tree view placeholder)
+    // Create left pane (terminal list)
     NSRect leftFrame = NSMakeRect(0, 0, _leftWidth, contentBounds.size.height);
-    _leftPane = [[NSView alloc] initWithFrame:leftFrame];
-    [_leftPane setWantsLayer:YES];
-    [_leftPane.layer setBackgroundColor:[[NSColor colorWithWhite:0.15 alpha:1.0] CGColor]];
+    _leftScrollView = [[NSScrollView alloc] initWithFrame:leftFrame];
+    [_leftScrollView setHasVerticalScroller:YES];
+    [_leftScrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+    _terminalListView = [[NSTableView alloc] initWithFrame:leftFrame];
+    [_terminalListView setDataSource:self];
+    [_terminalListView setDelegate:self];
+    [_terminalListView setHeaderView:nil];
+    [_terminalListView setRowHeight:80];
+    [_terminalListView setBackgroundColor:[NSColor colorWithWhite:0.15 alpha:1.0]];
+    [_terminalListView setSelectionHighlightStyle:NSTableViewSelectionHighlightStyleRegular];
+
+    NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"Terminal"];
+    [column setWidth:_leftWidth - 20];
+    [_terminalListView addTableColumn:column];
+
+    [_leftScrollView setDocumentView:_terminalListView];
 
     // Create right pane (terminal container)
     NSRect rightFrame = NSMakeRect(0, 0, contentBounds.size.width - _leftWidth, contentBounds.size.height);
@@ -131,7 +146,7 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     [_rightPane addSubview:firstTerminal];
 
     // Add subviews to split view
-    [_splitView addSubview:_leftPane];
+    [_splitView addSubview:_leftScrollView];
     [_splitView addSubview:_rightPane];
 
     [[self.window contentView] addSubview:_splitView];
@@ -140,6 +155,10 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self->_splitView setPosition:self->_leftWidth ofDividerAtIndex:0];
         [self->_terminalManager.selectedTerminal updateSize];
+        // Select first terminal in list
+        [self->_terminalListView reloadData];
+        [self->_terminalListView selectRowIndexes:[NSIndexSet indexSetWithIndex:0]
+                             byExtendingSelection:NO];
     });
 
     [self.window makeKeyAndOrderFront:nil];
@@ -198,6 +217,11 @@ static void close_surface_cb(void *userdata, bool processAlive) {
         [_terminalManager selectTerminal:newTerminal];
         [self.window makeFirstResponder:newTerminal];
 
+        // Update list and select new terminal
+        [_terminalListView reloadData];
+        [_terminalListView selectRowIndexes:[NSIndexSet indexSetWithIndex:_terminalManager.selectedIndex]
+                       byExtendingSelection:NO];
+
         dispatch_async(dispatch_get_main_queue(), ^{
             [newTerminal updateSize];
         });
@@ -219,6 +243,37 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     if (selected) {
         [selected setHidden:NO];
         [self.window makeFirstResponder:selected];
+    }
+}
+
+#pragma mark - NSTableViewDataSource
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+    return _terminalManager.terminals.count;
+}
+
+#pragma mark - NSTableViewDelegate
+
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    NSTextField *cell = [tableView makeViewWithIdentifier:@"TerminalCell" owner:self];
+    if (!cell) {
+        cell = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, tableColumn.width, 80)];
+        [cell setIdentifier:@"TerminalCell"];
+        [cell setBezeled:NO];
+        [cell setDrawsBackground:NO];
+        [cell setEditable:NO];
+        [cell setSelectable:NO];
+        [cell setTextColor:[NSColor whiteColor]];
+        [cell setFont:[NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular]];
+    }
+    cell.stringValue = [NSString stringWithFormat:@"Terminal %ld", (long)row + 1];
+    return cell;
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    NSInteger selectedRow = [_terminalListView selectedRow];
+    if (selectedRow >= 0 && (NSUInteger)selectedRow != _terminalManager.selectedIndex) {
+        [self selectTerminalAtIndex:(NSUInteger)selectedRow];
     }
 }
 
