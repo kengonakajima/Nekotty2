@@ -12,7 +12,20 @@ static void wakeup_cb(void *userdata) {
 }
 
 static bool action_cb(ghostty_app_t app, ghostty_target_s target, ghostty_action_s action) {
-    NSLog(@"action_cb: tag=%d", action.tag);
+    if (action.tag == GHOSTTY_ACTION_PWD && target.tag == GHOSTTY_TARGET_SURFACE) {
+        ghostty_surface_t surface = target.target.surface;
+        NSString *pwd = action.action.pwd.pwd
+            ? [NSString stringWithUTF8String:action.action.pwd.pwd]
+            : nil;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Find terminal by surface and update pwd
+            AppDelegate *delegate = (AppDelegate *)[NSApp delegate];
+            [delegate updatePwd:pwd forSurface:surface];
+        });
+        return true;
+    }
+
     return false;
 }
 
@@ -54,6 +67,8 @@ static const CGFloat kThumbnailHeight = 100;
     NSScrollView *_leftScrollView;
     NSView *_thumbnailContainer;
     NSMutableArray<NSView *> *_thumbnailViews;
+    NSMutableArray<NSView *> *_projectHeaderViews;
+    NSMutableSet<NSString *> *_foldedProjects;
     NSView *_rightPane;
     TerminalManager *_terminalManager;
     NSTimer *_tickTimer;
@@ -126,6 +141,8 @@ static const CGFloat kThumbnailHeight = 100;
     _thumbnailContainer = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, _leftWidth, contentBounds.size.height)];
     [_thumbnailContainer setWantsLayer:YES];
     _thumbnailViews = [NSMutableArray array];
+    _projectHeaderViews = [NSMutableArray array];
+    _foldedProjects = [NSMutableSet set];
 
     [_leftScrollView setDocumentView:_thumbnailContainer];
 
@@ -233,6 +250,14 @@ static const CGFloat kThumbnailHeight = 100;
     [appMenuItem setSubmenu:appMenu];
     [mainMenu addItem:appMenuItem];
 
+    // Edit menu
+    NSMenuItem *editMenuItem = [[NSMenuItem alloc] init];
+    NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+    [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+    [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+    [editMenuItem setSubmenu:editMenu];
+    [mainMenu addItem:editMenuItem];
+
     // Shell menu
     NSMenuItem *shellMenuItem = [[NSMenuItem alloc] init];
     NSMenu *shellMenu = [[NSMenu alloc] initWithTitle:@"Shell"];
@@ -245,6 +270,24 @@ static const CGFloat kThumbnailHeight = 100;
 
 - (void)newTerminal:(id)sender {
     [self createNewTerminal];
+}
+
+- (void)copy:(id)sender {
+    // Copy is handled by clipboard callback from ghostty
+}
+
+- (void)paste:(id)sender {
+    TerminalView *terminal = _terminalManager.selectedTerminal;
+    if (!terminal || !terminal.surface) return;
+
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    NSString *str = [pb stringForType:NSPasteboardTypeString];
+    if (str && str.length > 0) {
+        const char *utf8 = [str UTF8String];
+        if (utf8) {
+            ghostty_surface_text(terminal.surface, utf8, strlen(utf8));
+        }
+    }
 }
 
 - (void)selectTerminalAtIndex:(NSUInteger)index {
@@ -282,13 +325,40 @@ static const CGFloat kThumbnailHeight = 100;
     [self.window makeFirstResponder:terminal];
 }
 
+static const CGFloat kProjectHeaderHeight = 28;
+
 - (void)layoutThumbnails {
     CGFloat spacing = 8;
     CGFloat margin = 8;
     CGFloat containerWidth = _leftWidth - margin * 2;
 
+    // Remove old project headers
+    for (NSView *header in _projectHeaderViews) {
+        [header removeFromSuperview];
+    }
+    [_projectHeaderViews removeAllObjects];
+
+    // Group terminals by project
+    NSMutableDictionary<NSString *, NSMutableArray<TerminalView *> *> *projectGroups = [NSMutableDictionary dictionary];
+    NSMutableArray<NSString *> *projectOrder = [NSMutableArray array];
+
+    for (TerminalView *terminal in _terminalManager.terminals) {
+        NSString *project = terminal.projectName ?: @"(unknown)";
+        if (!projectGroups[project]) {
+            projectGroups[project] = [NSMutableArray array];
+            [projectOrder addObject:project];
+        }
+        [projectGroups[project] addObject:terminal];
+    }
+
     // Calculate total height needed
-    CGFloat totalHeight = margin + (_thumbnailViews.count * (kThumbnailHeight + spacing));
+    CGFloat totalHeight = margin;
+    for (NSString *project in projectOrder) {
+        totalHeight += kProjectHeaderHeight + spacing;
+        if (![_foldedProjects containsObject:project]) {
+            totalHeight += projectGroups[project].count * (kThumbnailHeight + spacing);
+        }
+    }
     CGFloat scrollHeight = _leftScrollView.bounds.size.height;
     if (totalHeight < scrollHeight) {
         totalHeight = scrollHeight;
@@ -297,12 +367,97 @@ static const CGFloat kThumbnailHeight = 100;
     // Update document view size
     [_thumbnailContainer setFrameSize:NSMakeSize(_leftWidth, totalHeight)];
 
-    // Place items from top (in flipped coordinates, top = totalHeight - margin)
-    CGFloat y = totalHeight - margin - kThumbnailHeight;
-    for (NSView *container in _thumbnailViews) {
-        [container setFrame:NSMakeRect(margin, y, containerWidth, kThumbnailHeight)];
-        y -= kThumbnailHeight + spacing;
+    // Layout from top
+    CGFloat y = totalHeight - margin;
+
+    for (NSString *project in projectOrder) {
+        // Create project header
+        y -= kProjectHeaderHeight;
+        NSView *header = [self createProjectHeaderForProject:project folded:[_foldedProjects containsObject:project]];
+        [header setFrame:NSMakeRect(margin, y, containerWidth, kProjectHeaderHeight)];
+        [_thumbnailContainer addSubview:header];
+        [_projectHeaderViews addObject:header];
+        y -= spacing;
+
+        // Layout terminals in this project (if not folded)
+        if (![_foldedProjects containsObject:project]) {
+            for (TerminalView *terminal in projectGroups[project]) {
+                // Find the thumbnail view for this terminal
+                for (NSView *container in _thumbnailViews) {
+                    NSString *terminalId = [NSString stringWithFormat:@"%p", terminal];
+                    if ([container.identifier isEqualToString:terminalId]) {
+                        y -= kThumbnailHeight;
+                        [container setFrame:NSMakeRect(margin, y, containerWidth, kThumbnailHeight)];
+                        [container setHidden:NO];
+                        y -= spacing;
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Hide thumbnails for folded projects
+            for (TerminalView *terminal in projectGroups[project]) {
+                for (NSView *container in _thumbnailViews) {
+                    NSString *terminalId = [NSString stringWithFormat:@"%p", terminal];
+                    if ([container.identifier isEqualToString:terminalId]) {
+                        [container setHidden:YES];
+                        break;
+                    }
+                }
+            }
+        }
     }
+}
+
+- (NSView *)createProjectHeaderForProject:(NSString *)project folded:(BOOL)folded {
+    CGFloat containerWidth = _leftWidth - 16;
+    NSView *header = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, containerWidth, kProjectHeaderHeight)];
+    [header setWantsLayer:YES];
+    [header.layer setBackgroundColor:[[NSColor colorWithWhite:0.25 alpha:1.0] CGColor]];
+    [header.layer setCornerRadius:4.0];
+
+    // Triangle indicator
+    NSString *triangle = folded ? @"▶" : @"▼";
+    NSTextField *indicator = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 4, 16, 20)];
+    [indicator setStringValue:triangle];
+    [indicator setBezeled:NO];
+    [indicator setDrawsBackground:NO];
+    [indicator setEditable:NO];
+    [indicator setSelectable:NO];
+    [indicator setTextColor:[NSColor whiteColor]];
+    [indicator setFont:[NSFont systemFontOfSize:12]];
+    [header addSubview:indicator];
+
+    // Project name label
+    NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(28, 4, containerWidth - 36, 20)];
+    [label setStringValue:project];
+    [label setBezeled:NO];
+    [label setDrawsBackground:NO];
+    [label setEditable:NO];
+    [label setSelectable:NO];
+    [label setTextColor:[NSColor whiteColor]];
+    [label setFont:[NSFont boldSystemFontOfSize:13]];
+    [header addSubview:label];
+
+    // Click gesture for folding
+    NSClickGestureRecognizer *click = [[NSClickGestureRecognizer alloc] initWithTarget:self action:@selector(projectHeaderClicked:)];
+    [header addGestureRecognizer:click];
+    [header setIdentifier:project];
+
+    return header;
+}
+
+- (void)projectHeaderClicked:(NSClickGestureRecognizer *)gesture {
+    NSView *header = gesture.view;
+    NSString *project = header.identifier;
+
+    if ([_foldedProjects containsObject:project]) {
+        [_foldedProjects removeObject:project];
+    } else {
+        [_foldedProjects addObject:project];
+    }
+
+    [self layoutThumbnails];
 }
 
 - (NSView *)createThumbnailContainerForTerminal:(TerminalView *)terminal {
@@ -375,6 +530,22 @@ static const CGFloat kThumbnailHeight = 100;
         } else {
             [container.layer setBorderColor:[[NSColor grayColor] CGColor]];
             [container.layer setBorderWidth:1.0];
+        }
+    }
+}
+
+- (void)updatePwd:(NSString *)pwd forSurface:(ghostty_surface_t)surface {
+    for (TerminalView *terminal in _terminalManager.terminals) {
+        if (terminal.surface == surface) {
+            NSString *oldProject = terminal.projectName;
+            terminal.pwd = pwd;
+            NSString *newProject = terminal.projectName;
+
+            // Re-layout if project changed
+            if (![oldProject isEqualToString:newProject]) {
+                [self layoutThumbnails];
+            }
+            break;
         }
     }
 }

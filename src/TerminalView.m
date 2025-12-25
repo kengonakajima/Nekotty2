@@ -37,6 +37,38 @@
     }
 }
 
+- (NSString *)projectName {
+    if (!self.pwd || self.pwd.length == 0) {
+        return @"(unknown)";
+    }
+
+    // Expand ~ to home directory
+    NSString *expanded = [self.pwd stringByExpandingTildeInPath];
+    NSString *home = NSHomeDirectory();
+
+    // Check if path is under home directory
+    if ([expanded hasPrefix:home]) {
+        NSString *relative = [expanded substringFromIndex:home.length];
+        // Remove leading /
+        if ([relative hasPrefix:@"/"]) {
+            relative = [relative substringFromIndex:1];
+        }
+        // Get first path component as project name
+        NSArray *components = [relative pathComponents];
+        if (components.count > 0) {
+            return components[0];
+        }
+    }
+
+    // Not under home, use first path component after root
+    NSArray *components = [expanded pathComponents];
+    if (components.count > 1) {
+        return components[1];
+    }
+
+    return @"(root)";
+}
+
 - (BOOL)acceptsFirstResponder {
     return YES;
 }
