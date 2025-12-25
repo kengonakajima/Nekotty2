@@ -1,5 +1,6 @@
 #import "AppDelegate.h"
 #import "TerminalView.h"
+#import "TerminalManager.h"
 #import <ghostty.h>
 
 // Runtime callbacks
@@ -49,8 +50,10 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     ghostty_config_t _config;
     NSSplitView *_splitView;
     NSView *_leftPane;       // Tree view placeholder
-    TerminalView *_terminalView;
+    NSView *_rightPane;      // Container for terminal
+    TerminalManager *_terminalManager;
     NSTimer *_tickTimer;
+    CGFloat _leftWidth;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -79,7 +82,14 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     }
     NSLog(@"App created: %p", _app);
 
+    // Create terminal manager
+    _terminalManager = [[TerminalManager alloc] initWithApp:_app];
+
+    // Setup menu
+    [self setupMenu];
+
     // Create window
+    _leftWidth = 300;
     NSRect frame = NSMakeRect(100, 100, 1200, 800);
     NSWindowStyleMask style = NSWindowStyleMaskTitled
                             | NSWindowStyleMaskClosable
@@ -101,36 +111,39 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     [_splitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
     // Create left pane (tree view placeholder)
-    CGFloat leftWidth = 300;
-    NSRect leftFrame = NSMakeRect(0, 0, leftWidth, contentBounds.size.height);
+    NSRect leftFrame = NSMakeRect(0, 0, _leftWidth, contentBounds.size.height);
     _leftPane = [[NSView alloc] initWithFrame:leftFrame];
     [_leftPane setWantsLayer:YES];
     [_leftPane.layer setBackgroundColor:[[NSColor colorWithWhite:0.15 alpha:1.0] CGColor]];
 
-    // Create terminal view (right pane)
-    NSRect rightFrame = NSMakeRect(0, 0, contentBounds.size.width - leftWidth, contentBounds.size.height);
-    _terminalView = [[TerminalView alloc] initWithApp:_app frame:rightFrame];
-    if (!_terminalView) {
+    // Create right pane (terminal container)
+    NSRect rightFrame = NSMakeRect(0, 0, contentBounds.size.width - _leftWidth, contentBounds.size.height);
+    _rightPane = [[NSView alloc] initWithFrame:rightFrame];
+    [_rightPane setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+    // Create first terminal
+    TerminalView *firstTerminal = [_terminalManager createTerminalWithFrame:_rightPane.bounds];
+    if (!firstTerminal) {
         NSLog(@"Failed to create terminal view");
         return;
     }
-    [_terminalView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [firstTerminal setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+    [_rightPane addSubview:firstTerminal];
 
     // Add subviews to split view
     [_splitView addSubview:_leftPane];
-    [_splitView addSubview:_terminalView];
+    [_splitView addSubview:_rightPane];
 
     [[self.window contentView] addSubview:_splitView];
 
     // Set divider position after layout is complete
-    CGFloat savedLeftWidth = leftWidth;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self->_splitView setPosition:savedLeftWidth ofDividerAtIndex:0];
-        [self->_terminalView updateSize];
+        [self->_splitView setPosition:self->_leftWidth ofDividerAtIndex:0];
+        [self->_terminalManager.selectedTerminal updateSize];
     });
 
     [self.window makeKeyAndOrderFront:nil];
-    [self.window makeFirstResponder:_terminalView];
+    [self.window makeFirstResponder:firstTerminal];
 
     // Start tick timer
     _tickTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
@@ -144,8 +157,68 @@ static void close_surface_cb(void *userdata, bool processAlive) {
     if (_app) {
         ghostty_app_tick(_app);
     }
-    if (_terminalView) {
-        [_terminalView setNeedsDisplay:YES];
+    // Redraw all terminals
+    for (TerminalView *terminal in _terminalManager.terminals) {
+        [terminal setNeedsDisplay:YES];
+    }
+}
+
+- (void)setupMenu {
+    NSMenu *mainMenu = [[NSMenu alloc] init];
+
+    // App menu
+    NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
+    NSMenu *appMenu = [[NSMenu alloc] init];
+    [appMenu addItemWithTitle:@"Quit Nekotty" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenuItem setSubmenu:appMenu];
+    [mainMenu addItem:appMenuItem];
+
+    // Shell menu
+    NSMenuItem *shellMenuItem = [[NSMenuItem alloc] init];
+    NSMenu *shellMenu = [[NSMenu alloc] initWithTitle:@"Shell"];
+    [shellMenu addItemWithTitle:@"New Tab" action:@selector(newTerminal:) keyEquivalent:@"t"];
+    [shellMenuItem setSubmenu:shellMenu];
+    [mainMenu addItem:shellMenuItem];
+
+    [NSApp setMainMenu:mainMenu];
+}
+
+- (void)newTerminal:(id)sender {
+    // Hide current terminal
+    TerminalView *current = _terminalManager.selectedTerminal;
+    if (current) {
+        [current setHidden:YES];
+    }
+
+    // Create new terminal
+    TerminalView *newTerminal = [_terminalManager createTerminalWithFrame:_rightPane.bounds];
+    if (newTerminal) {
+        [newTerminal setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+        [_rightPane addSubview:newTerminal];
+        [_terminalManager selectTerminal:newTerminal];
+        [self.window makeFirstResponder:newTerminal];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [newTerminal updateSize];
+        });
+    }
+}
+
+- (void)selectTerminalAtIndex:(NSUInteger)index {
+    if (index >= _terminalManager.terminals.count) return;
+
+    // Hide current terminal
+    TerminalView *current = _terminalManager.selectedTerminal;
+    if (current) {
+        [current setHidden:YES];
+    }
+
+    // Show selected terminal
+    [_terminalManager selectTerminalAtIndex:index];
+    TerminalView *selected = _terminalManager.selectedTerminal;
+    if (selected) {
+        [selected setHidden:NO];
+        [self.window makeFirstResponder:selected];
     }
 }
 
