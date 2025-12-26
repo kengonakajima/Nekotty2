@@ -203,10 +203,27 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
         NSImageView *imageView = [container viewWithTag:1];
 
         if (imageView && terminal) {
-            // Capture terminal content to image
+            // Get current text content (first 10 lines, trimmed)
+            // Use first lines instead of last, since content starts from top
+            NSString *currentText = [[terminal lastLinesText:10 maxChars:80]
+                stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+            // Skip capture if content hasn't changed AND text is substantial
+            // If text is too short, always recapture (content may be at top of screen)
+            BOOL textIsSubstantial = (currentText.length > 20);
+            BOOL textUnchanged = terminal.lastCapturedText && [currentText isEqualToString:terminal.lastCapturedText];
+
+            if (textIsSubstantial && textUnchanged && terminal.cachedThumbnail) {
+                [imageView setImage:terminal.cachedThumbnail];
+                continue;
+            }
+
+            // Content changed or text too short - capture new thumbnail
             NSImage *image = [self captureTerminal:terminal];
             if (image) {
                 [imageView setImage:image];
+                terminal.cachedThumbnail = image;
+                terminal.lastCapturedText = currentText;
             }
         }
     }

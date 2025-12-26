@@ -6,6 +6,8 @@
 @property (nonatomic, assign) ghostty_surface_t surface;
 @property (nonatomic, copy) NSString *pwd;
 @property (nonatomic, readonly) NSString *projectName;
+@property (nonatomic, copy) NSString *lastCapturedText;
+@property (nonatomic, strong) NSImage *cachedThumbnail;
 
 - (instancetype)initWithApp:(ghostty_app_t)app frame:(NSRect)frame;
 - (void)updateSize;

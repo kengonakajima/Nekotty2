@@ -7,6 +7,9 @@
     NSRange _selectedRange;
 }
 
+@synthesize lastCapturedText = _lastCapturedText;
+@synthesize cachedThumbnail = _cachedThumbnail;
+
 - (instancetype)initWithApp:(ghostty_app_t)app frame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
