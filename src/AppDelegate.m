@@ -7,7 +7,7 @@
 static void wakeup_cb(void *userdata) {
     dispatch_async(dispatch_get_main_queue(), ^{
         AppDelegate *delegate = (__bridge AppDelegate *)userdata;
-        [delegate tick];
+        [delegate handleWakeup];
     });
 }
 
@@ -73,6 +73,7 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
     TerminalManager *_terminalManager;
     NSTimer *_tickTimer;
     CGFloat _leftWidth;
+    BOOL _needsRedraw;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -169,29 +170,37 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
     [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:_terminalManager.selectedTerminal];
 
-    // Start tick timer
-    _tickTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
+    // Start tick timer (5fps - only for thumbnail updates)
+    _tickTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/5.0
                                                   target:self
                                                 selector:@selector(tick)
                                                 userInfo:nil
                                                  repeats:YES];
 }
 
-- (void)tick {
-    static int tickCount = 0;
-    tickCount++;
-
+- (void)handleWakeup {
+    // Called by ghostty when content changes
     if (_app) {
         ghostty_app_tick(_app);
     }
 
-    // Redraw all terminals
-    for (TerminalView *terminal in _terminalManager.terminals) {
-        [terminal setNeedsDisplay:YES];
+    // Redraw selected terminal
+    TerminalView *selected = _terminalManager.selectedTerminal;
+    if (selected) {
+        [selected setNeedsDisplay:YES];
     }
 
-    // Update thumbnails every 10 ticks (~6 fps)
-    if (tickCount % 10 == 0) {
+    // Mark all terminals for potential thumbnail update
+    for (TerminalView *terminal in _terminalManager.terminals) {
+        terminal.needsThumbnailUpdate = YES;
+    }
+    _needsRedraw = YES;
+}
+
+- (void)tick {
+    // Update thumbnails if content changed (5fps max)
+    if (_needsRedraw) {
+        _needsRedraw = NO;
         [self updateThumbnails];
     }
 }
@@ -203,27 +212,31 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
         NSImageView *imageView = [container viewWithTag:1];
 
         if (imageView && terminal) {
-            // Get current text content (first 10 lines, trimmed)
-            // Use first lines instead of last, since content starts from top
-            NSString *currentText = [[terminal lastLinesText:10 maxChars:80]
-                stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-
-            // Skip capture if content hasn't changed AND text is substantial
-            // If text is too short, always recapture (content may be at top of screen)
-            BOOL textIsSubstantial = (currentText.length > 20);
-            BOOL textUnchanged = terminal.lastCapturedText && [currentText isEqualToString:terminal.lastCapturedText];
-
-            if (textIsSubstantial && textUnchanged && terminal.cachedThumbnail) {
-                [imageView setImage:terminal.cachedThumbnail];
+            // Skip if not marked for update
+            if (!terminal.needsThumbnailUpdate && terminal.cachedThumbnail) {
                 continue;
             }
 
-            // Content changed or text too short - capture new thumbnail
+            // Check if text content actually changed (use first lines where content is)
+            NSString *currentText = [[terminal firstLinesText:10 maxChars:80]
+                stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+            // Skip if text unchanged AND both are non-empty
+            BOOL bothNonEmpty = (currentText.length > 0 && terminal.lastCapturedText.length > 0);
+            BOOL textUnchanged = [currentText isEqualToString:terminal.lastCapturedText];
+
+            if (bothNonEmpty && textUnchanged && terminal.cachedThumbnail) {
+                terminal.needsThumbnailUpdate = NO;
+                continue;  // Text unchanged, skip capture
+            }
+
+            // Content changed - capture new thumbnail
             NSImage *image = [self captureTerminal:terminal];
             if (image) {
                 [imageView setImage:image];
                 terminal.cachedThumbnail = image;
                 terminal.lastCapturedText = currentText;
+                terminal.needsThumbnailUpdate = NO;
             }
         }
     }

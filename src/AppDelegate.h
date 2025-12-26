@@ -6,6 +6,7 @@
 @property (strong, nonatomic) NSWindow *window;
 
 - (void)tick;
+- (void)handleWakeup;
 - (void)updatePwd:(NSString *)pwd forSurface:(ghostty_surface_t)surface;
 
 @end

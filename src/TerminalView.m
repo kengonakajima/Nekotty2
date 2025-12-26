@@ -9,6 +9,7 @@
 
 @synthesize lastCapturedText = _lastCapturedText;
 @synthesize cachedThumbnail = _cachedThumbnail;
+@synthesize needsThumbnailUpdate = _needsThumbnailUpdate;
 
 - (instancetype)initWithApp:(ghostty_app_t)app frame:(NSRect)frame {
     self = [super initWithFrame:frame];
@@ -118,6 +119,7 @@
 - (void)drawRect:(NSRect)dirtyRect {
     if (self.surface) {
         ghostty_surface_draw(self.surface);
+        self.needsThumbnailUpdate = YES;
     }
 }
 
@@ -279,6 +281,41 @@
     selection.top_left.y = startRow;
     selection.bottom_right.x = endCol;
     selection.bottom_right.y = size.rows;
+    selection.rectangle = true;
+
+    ghostty_text_s text = {0};
+    if (!ghostty_surface_read_text(self.surface, selection, &text)) {
+        return @"";
+    }
+
+    NSString *result = @"";
+    if (text.text && text.text_len > 0) {
+        result = [[NSString alloc] initWithBytes:text.text
+                                          length:text.text_len
+                                        encoding:NSUTF8StringEncoding];
+        if (!result) result = @"";
+    }
+
+    ghostty_surface_free_text(self.surface, &text);
+    return result;
+}
+
+- (NSString *)firstLinesText:(int)lineCount maxChars:(int)maxChars {
+    if (!self.surface) return @"";
+
+    // Get terminal grid size
+    ghostty_surface_size_s size = ghostty_surface_size(self.surface);
+    if (size.rows == 0 || size.columns == 0) return @"";
+
+    // Calculate selection for first N lines
+    int endRow = (lineCount < size.rows) ? lineCount : size.rows;
+    int endCol = (size.columns > maxChars) ? maxChars : size.columns;
+
+    ghostty_selection_s selection = {0};
+    selection.top_left.x = 0;
+    selection.top_left.y = 0;
+    selection.bottom_right.x = endCol;
+    selection.bottom_right.y = endRow;
     selection.rectangle = true;
 
     ghostty_text_s text = {0};
