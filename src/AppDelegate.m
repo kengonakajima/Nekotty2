@@ -257,34 +257,15 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
     // Force draw
     [terminal displayIfNeeded];
 
-    // Get terminal grid info
-    ghostty_surface_size_s gridSize = ghostty_surface_size(terminal.surface);
-    CGFloat cellHeight = gridSize.cell_height_px / 2.0;  // Convert from pixels to points (2x retina)
-    CGFloat cellWidth = gridSize.cell_width_px / 2.0;
-
-    // Display at half size of main terminal
-    CGFloat displayScale = 0.5;
-
-    // Thumbnail target width (left pane width minus margins)
-    CGFloat thumbWidth = _leftWidth - 16;
-
-    // Calculate how many columns to show to fill thumbnail width
-    CGFloat columnsToShow = (thumbWidth / displayScale) / cellWidth;
-    columnsToShow = MIN(columnsToShow, gridSize.columns);
-
-    // Show 5 lines
-    CGFloat linesToShow = 5.0;
-    linesToShow = MIN(linesToShow, gridSize.rows);
-
-    // Calculate crop dimensions in points
-    CGFloat cropWidth = columnsToShow * cellWidth;
-    CGFloat cropHeight = linesToShow * cellHeight;
-
     NSRect termBounds = terminal.bounds;
 
-    // Limit crop to actual terminal size
-    CGFloat actualCropWidth = MIN(cropWidth, termBounds.size.width);
-    CGFloat actualCropHeight = MIN(cropHeight, termBounds.size.height);
+    // Fixed thumbnail size (independent of font size)
+    CGFloat thumbWidth = _leftWidth - 16;
+    CGFloat thumbHeight = kThumbnailHeight;
+
+    // Crop from terminal at 2x thumbnail size (for quality)
+    CGFloat cropWidth = MIN(thumbWidth * 2, termBounds.size.width);
+    CGFloat cropHeight = MIN(thumbHeight * 2, termBounds.size.height);
 
     // Create bitmap from view (full view)
     NSBitmapImageRep *bitmap = [terminal bitmapImageRepForCachingDisplayInRect:termBounds];
@@ -292,15 +273,12 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
         [terminal cacheDisplayInRect:termBounds toBitmapImageRep:bitmap];
 
         // Scan bitmap to find lowest row with content (current prompt area)
-        // Bitmap data: row 0 is at TOP of image (top-to-bottom storage)
-        // Cocoa coords: origin at BOTTOM-LEFT (y increases upward)
         CGFloat scale = terminal.window ? terminal.window.backingScaleFactor : 2.0;
         NSInteger bitmapHeight = bitmap.pixelsHigh;
         NSInteger bitmapWidth = bitmap.pixelsWide;
 
         // Find the lowest (bottom-most) row with content
-        // Scan from bitmap bottom (row height-1) to top (row 0)
-        NSInteger lowestContentBitmapRow = 0; // Default to top of image
+        NSInteger lowestContentBitmapRow = 0;
         unsigned char *bitmapData = [bitmap bitmapData];
         NSInteger bytesPerRow = [bitmap bytesPerRow];
         NSInteger samplesPerPixel = [bitmap samplesPerPixel];
@@ -308,10 +286,8 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
         for (NSInteger row = bitmapHeight - 1; row >= 0; row--) {
             BOOL hasContent = NO;
             unsigned char *rowData = bitmapData + row * bytesPerRow;
-            // Check a few columns for non-black pixels
             for (NSInteger col = 0; col < bitmapWidth && col < 100; col++) {
                 unsigned char *pixel = rowData + col * samplesPerPixel;
-                // Check if not background color (terminal bg is around 16,16,16)
                 if (pixel[0] > 20 || pixel[1] > 20 || pixel[2] > 20) {
                     hasContent = YES;
                     break;
@@ -319,49 +295,42 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
             }
             if (hasContent) {
                 lowestContentBitmapRow = row;
-                break; // Found the bottom-most content row
+                break;
             }
         }
 
         // Convert bitmap row to Cocoa Y coordinate
-        // Bitmap row 0 = top of image = Cocoa Y (height-1)
-        // Bitmap row (height-1) = bottom of image = Cocoa Y 0
         CGFloat lowestContentCocoaY = (bitmapHeight - 1 - lowestContentBitmapRow) / scale;
 
-        // Crop 5 lines ending at the lowest content row
-        // The lowest content row should be at the BOTTOM of the crop
-        CGFloat cropBottom = lowestContentCocoaY;  // Start from the content row
-        CGFloat cropTop = cropBottom + actualCropHeight;  // 5 lines above
+        // Crop area ending at the lowest content row
+        CGFloat cropBottom = lowestContentCocoaY;
+        CGFloat cropTop = cropBottom + cropHeight;
 
         // Clamp to bounds
         if (cropBottom < 0) {
             cropBottom = 0;
-            cropTop = actualCropHeight;
+            cropTop = cropHeight;
         }
         if (cropTop > termBounds.size.height) {
             cropTop = termBounds.size.height;
-            cropBottom = cropTop - actualCropHeight;
+            cropBottom = MAX(0, cropTop - cropHeight);
         }
 
-        NSRect srcRect = NSMakeRect(0, cropBottom, actualCropWidth, actualCropHeight);
-
-        // Thumbnail size exactly matches cropped content at display scale
-        CGFloat actualThumbWidth = actualCropWidth * displayScale;
-        CGFloat actualThumbHeight = actualCropHeight * displayScale;
+        NSRect srcRect = NSMakeRect(0, cropBottom, cropWidth, cropTop - cropBottom);
 
         NSImage *fullImage = [[NSImage alloc] initWithSize:termBounds.size];
         [fullImage addRepresentation:bitmap];
 
-        NSImage *croppedImage = [[NSImage alloc] initWithSize:NSMakeSize(actualThumbWidth, actualThumbHeight)];
+        // Always output fixed thumbnail size
+        NSImage *croppedImage = [[NSImage alloc] initWithSize:NSMakeSize(thumbWidth, thumbHeight)];
         [croppedImage lockFocus];
         [[NSGraphicsContext currentContext] setImageInterpolation:NSImageInterpolationHigh];
-        [fullImage drawInRect:NSMakeRect(0, 0, actualThumbWidth, actualThumbHeight)
+        [fullImage drawInRect:NSMakeRect(0, 0, thumbWidth, thumbHeight)
                      fromRect:srcRect
                     operation:NSCompositingOperationCopy
                      fraction:1.0];
         [croppedImage unlockFocus];
 
-        // Restore hidden state
         [terminal setHidden:wasHidden];
         return croppedImage;
     }
@@ -385,17 +354,39 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
     NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
     [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
     [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+    [editMenu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"Clear Screen" action:@selector(clearScreen:) keyEquivalent:@"k"];
     [editMenuItem setSubmenu:editMenu];
     [mainMenu addItem:editMenuItem];
+
+    // View menu
+    NSMenuItem *viewMenuItem = [[NSMenuItem alloc] init];
+    NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
+    NSMenuItem *biggerItem = [viewMenu addItemWithTitle:@"Bigger" action:@selector(increaseFontSize:) keyEquivalent:@"+"];
+    [biggerItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+    [viewMenu addItemWithTitle:@"Smaller" action:@selector(decreaseFontSize:) keyEquivalent:@"-"];
+    [viewMenu addItemWithTitle:@"Actual Size" action:@selector(resetFontSize:) keyEquivalent:@"0"];
+    [viewMenuItem setSubmenu:viewMenu];
+    [mainMenu addItem:viewMenuItem];
 
     // Shell menu
     NSMenuItem *shellMenuItem = [[NSMenuItem alloc] init];
     NSMenu *shellMenu = [[NSMenu alloc] initWithTitle:@"Shell"];
     [shellMenu addItemWithTitle:@"New Tab" action:@selector(newTerminal:) keyEquivalent:@"t"];
+    [shellMenu addItemWithTitle:@"Close Terminal" action:@selector(closeTerminal:) keyEquivalent:@"w"];
     [shellMenuItem setSubmenu:shellMenu];
     [mainMenu addItem:shellMenuItem];
 
     [NSApp setMainMenu:mainMenu];
+}
+
+- (void)performAction:(NSString *)action {
+    TerminalView *terminal = _terminalManager.selectedTerminal;
+    if (!terminal || !terminal.surface) return;
+    const char *utf8 = [action UTF8String];
+    bool result = ghostty_surface_binding_action(terminal.surface, utf8, strlen(utf8));
+    NSLog(@"performAction: %@ -> %s", action, result ? "success" : "failed");
 }
 
 - (void)newTerminal:(id)sender {
@@ -403,7 +394,7 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
 }
 
 - (void)copy:(id)sender {
-    // Copy is handled by clipboard callback from ghostty
+    [self performAction:@"copy_to_clipboard"];
 }
 
 - (void)paste:(id)sender {
@@ -418,6 +409,50 @@ static const CGFloat kThumbnailHeight = 40;  // 5 lines * 16pt * 0.5 scale = 40p
             ghostty_surface_text(terminal.surface, utf8, strlen(utf8));
         }
     }
+}
+
+- (void)selectAll:(id)sender {
+    [self performAction:@"select_all"];
+}
+
+- (void)clearScreen:(id)sender {
+    [self performAction:@"clear_screen"];
+}
+
+- (void)increaseFontSize:(id)sender {
+    [self performAction:@"increase_font_size:1"];
+}
+
+- (void)decreaseFontSize:(id)sender {
+    [self performAction:@"decrease_font_size:1"];
+}
+
+- (void)resetFontSize:(id)sender {
+    [self performAction:@"reset_font_size"];
+}
+
+- (void)closeTerminal:(id)sender {
+    if (_terminalManager.terminals.count <= 1) {
+        // Last terminal - don't close
+        return;
+    }
+
+    NSUInteger index = _terminalManager.selectedIndex;
+    TerminalView *terminal = _terminalManager.selectedTerminal;
+
+    // Remove thumbnail view
+    NSView *container = _thumbnailViews[index];
+    [container removeFromSuperview];
+    [_thumbnailViews removeObjectAtIndex:index];
+
+    // Remove terminal
+    [terminal removeFromSuperview];
+    [_terminalManager removeTerminal:terminal];
+
+    // Select another terminal
+    [self showSelectedTerminal];
+    [self.window makeFirstResponder:_terminalManager.selectedTerminal];
+    [self layoutThumbnails];
 }
 
 - (void)selectTerminalAtIndex:(NSUInteger)index {
